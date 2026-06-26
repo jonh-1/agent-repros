@@ -11,7 +11,7 @@ from livekit.agents import (
     cli,
 )
 from livekit.agents.llm import function_tool
-from livekit.plugins import openai, phonic
+from livekit.plugins import phonic
 
 load_dotenv(".env.local")
 
@@ -81,7 +81,7 @@ Listen to their response and call question_attempt with their answer in numeric 
         return f'The user said: "{guess}". Encourage them and ask them to try again.'
 
 
-class PhraseCheckAgent(Agent):
+class MathAgent(Agent):
     def __init__(self) -> None:
         super().__init__(
             instructions="""\
@@ -109,7 +109,7 @@ After all questions are complete, let them know they have finished and wrap up w
 server = AgentServer()
 
 
-@server.rtc_session()
+@server.rtc_session(agent_name="realtime-tasks-agent")
 async def entrypoint(ctx: JobContext) -> None:
     session = AgentSession(
         llm=phonic.realtime.RealtimeModel(voice="sabrina"),
@@ -117,7 +117,7 @@ async def entrypoint(ctx: JobContext) -> None:
     )
 
     await session.start(
-        agent=PhraseCheckAgent(),
+        agent=MathAgent(),
         room=ctx.room,
     )
 

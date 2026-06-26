@@ -1,8 +1,8 @@
 import asyncio
-import json
 import logging
 from datetime import datetime
 from os import getenv
+from pathlib import Path
 import time
 from uuid import uuid4
 
@@ -13,10 +13,12 @@ from livekit.agents import (
     Agent,
     AgentServer,
     AgentSession,
+    BackgroundAudioPlayer,
     ConversationItemAddedEvent,
     InterruptionOptions,
     JobContext,
     JobProcess,
+    PlayHandle,
     PreemptiveGenerationOptions,
     RunContext,
     StopResponse,
@@ -32,7 +34,6 @@ from livekit.agents import (
 )
 from livekit.plugins import noise_cancellation, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
-from livekit.agents.inference import TurnDetector
 from livekit import api
 
 from openai.types.shared_params import reasoning
@@ -43,18 +44,8 @@ load_dotenv(".env.local")
 
 AGENT_NUMBER = getenv("AGENT_NUMBER")
 TRANSFER_NUMBER = getenv("TRANSFER_NUMBER")
-
-async def on_session_end(ctx: JobContext) -> None:
-    report = ctx.make_session_report()
-    report_dict = report.to_dict()
-
-    current_date = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"./.tmp/session_report_{ctx.room.name}_{current_date}.json"
-
-    with open(filename, 'w') as f:
-        json.dump(report_dict, f, indent=2)
-
-    print(f"Session report for {ctx.room.name} saved to {filename}")
+RINGING_AUDIO_PATH = Path(__file__).resolve().parent.parent / "assets" / "ringing.wav"
+TRANSFER_RINGING_TIMEOUT_SECONDS = 60
 
 class Assistant(Agent):
     def __init__(self) -> None:
@@ -77,7 +68,6 @@ class Assistant(Agent):
             allow_interruptions=True,
         )
 
-
     @function_tool
     async def get_current_date_and_time(self, context: RunContext) -> list[dict]:
         """
@@ -99,6 +89,7 @@ class Assistant(Agent):
             6: "Sunday",
         }
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S") + " " + days_of_the_week[datetime.now().weekday()]
+
 
     @function_tool
     async def transfer_caller(self, context: RunContext) -> None:
@@ -154,19 +145,30 @@ class Assistant(Agent):
             if p.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
                 sip_participant = p
                 break
+        
+        req = api.TransferSIPParticipantRequest(
+            room_name=room.name,
+            participant_identity=sip_participant.identity,
+            transfer_to=transfer_to,
+            play_dialtone=False,
+            ringing_timeout=Duration(seconds=TRANSFER_RINGING_TIMEOUT_SECONDS),
+        )
 
         await context.session.say("Transferring you now, please hold.", allow_interruptions=False)
-        
+
+        background_audio: BackgroundAudioPlayer = job_ctx.proc.userdata["background_audio"]
+        ringing_handle: PlayHandle | None = None
+
         try:
-            await job_ctx.transfer_sip_participant(
-                participant=sip_participant,
-                transfer_to=transfer_to,
-            )
-            logger.info(f"Transferred SIP participant")
+            ringing_handle = background_audio.play(str(RINGING_AUDIO_PATH), loop=True)
+            await job_ctx.api.sip.transfer_sip_participant(req)
+            logger.info("Transferred SIP participant")
         except Exception as e:
             logger.error(f"Error transferring SIP participant: {e}")
             await context.session.say("Sorry, I couldn't transfer you. Please try again later.", allow_interruptions=False)
-            return
+        finally:
+            if ringing_handle is not None:
+                ringing_handle.stop()
 
 
 server = AgentServer()
@@ -209,20 +211,43 @@ async def _start_egress(ctx: JobContext) -> None:
         logger.error(f"Error starting egress: {e}")
 
 
-@server.rtc_session(agent_name="main-agent-console", on_session_end=on_session_end)
-async def agent(ctx: JobContext):
+@server.rtc_session(agent_name="custom-ringing-transfer-agent")
+async def appointment_scheduler_agent(ctx: JobContext):
     ctx.log_context_fields = {
         "room": ctx.room.name,
     }
 
     session = AgentSession(
         stt=inference.STT(model="deepgram/nova-3", language="multi"),
-        llm=inference.LLM(model="google/gemini-2.5-flash"),
-        tts=inference.TTS(model="cartesia/sonic-3", voice="5ee9feff-1265-424a-9d7f-8e4d431a12c7"),
+        llm=inference.LLM(model="google/gemini-3.5-flash", extra_kwargs={"max_completion_tokens": 250, "reasoning_effort": "low"}),
+        tts=inference.TTS(
+            model="cartesia/sonic-3", voice="5ee9feff-1265-424a-9d7f-8e4d431a12c7"
+        ),
         vad=ctx.proc.userdata["vad"],
         preemptive_generation=True,
-        turn_detection=TurnDetector(),
-        allow_interruptions=True,
+        turn_handling=TurnHandlingOptions(
+            endpointing=EndpointingOptions(
+                mode="fixed",
+                min_delay=0.5,
+                max_delay=3,
+                alpha=0.9,
+            ),
+            interruption=InterruptionOptions(
+                mode="adaptive",
+                discard_audio_if_uninterruptible=True,
+                min_duration=0.5,
+                min_words=0, 
+                resume_false_interruption=True,
+                false_interruption_timeout=4,
+                backchannel_boundary=[1, 3.5],
+            ),
+            preemptive_generation=PreemptiveGenerationOptions(
+                enabled=True,
+                preemptive_tts=False,
+                max_speech_duration=10,
+                max_retries=3,
+            )
+        )
     )
 
     @session.on("conversation_item_added")
@@ -231,10 +256,17 @@ async def agent(ctx: JobContext):
             return
         m = ev.item.metrics
         if ev.item.role == "assistant" and m.get("e2e_latency") is not None:
-            logger.info({"role": ev.item.role, "e2e_latency": m.get("e2e_latency"), "interrupted": ev.item.interrupted})
+            logger.info(
+                "E2E latency: %.3fs (metrics=%s)",
+                m["e2e_latency"],
+                m,
+            )
 
     await _start_egress(ctx)
-    
+
+    background_audio = BackgroundAudioPlayer()
+    ctx.proc.userdata["background_audio"] = background_audio
+
     await session.start(
         agent=Assistant(),
         room=ctx.room,
@@ -255,6 +287,8 @@ async def agent(ctx: JobContext):
             "logs": True,
         }
     )
+
+    await background_audio.start(room=ctx.room, agent_session=session)
 
     await ctx.connect()
 
