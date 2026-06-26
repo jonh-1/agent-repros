@@ -89,7 +89,7 @@ def prewarm(proc: JobProcess):
 server.setup_fnc = prewarm
 
 
-@server.rtc_session(agent_name="main-agent-console")
+@server.rtc_session(agent_name="langfuse-agent-test")
 async def agent(ctx: JobContext):
     ctx.log_context_fields = {
         "room": ctx.room.name,
