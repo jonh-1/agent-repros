@@ -25,9 +25,6 @@ logger = logging.getLogger("agent")
 
 load_dotenv(".env.local")
 
-AGENT_NUMBER = getenv("AGENT_NUMBER")
-TRANSFER_NUMBER = getenv("TRANSFER_NUMBER")
-
 
 def setup_langfuse(metadata: dict[str, AttributeValue] | None = None) -> TracerProvider:
     public_key = getenv("LANGFUSE_PUBLIC_KEY")
