@@ -35,7 +35,6 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from livekit.agents.inference import TurnDetector
 from livekit import api
 
-from openai.types.shared_params import reasoning
 
 logger = logging.getLogger("agent")
 
@@ -162,6 +161,10 @@ class Assistant(Agent):
                 participant=sip_participant,
                 transfer_to=transfer_to,
             )
+            self.session.input.set_audio_enabled(False)
+            context.session.output.set_audio_enabled(False)
+            
+            logger.info("Disabled session I/O")
             logger.info(f"Transferred SIP participant")
         except Exception as e:
             logger.error(f"Error transferring SIP participant: {e}")
