@@ -59,10 +59,7 @@ class Assistant(Agent):
         )
     
     async def on_enter(self) -> None:
-        email = await GetEmailTask(
-            instructions="Get the user's email address.",
-            allow_interruptions=True,
-        )
+        email = await GetEmailTask()
         logger.info(f"Email: {email}")
 
         await self.session.generate_reply(
