@@ -98,7 +98,6 @@ async def generate_silence_reply(session: AgentSession, *, instructions: str) ->
             break
         if isinstance(item, llm.ChatMessage) and item.role == "assistant":
             item.extra["silence_followup"] = True
-            # item.content = ["[automated follow-up during user silence]"]
 
 
 server = AgentServer()
