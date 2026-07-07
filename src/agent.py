@@ -76,7 +76,6 @@ class Assistant(Agent):
             allow_interruptions=True,
         )
 
-
     @function_tool
     async def get_current_date_and_time(self, context: RunContext) -> list[dict]:
         """
@@ -212,7 +211,7 @@ async def _start_egress(ctx: JobContext) -> None:
         logger.error(f"Error starting egress: {e}")
 
 
-@server.rtc_session(agent_name="main-agent-console", on_session_end=on_session_end)
+@server.rtc_session(agent_name="main-agent-prod", on_session_end=on_session_end)
 async def agent(ctx: JobContext):
     ctx.log_context_fields = {
         "room": ctx.room.name,
@@ -236,7 +235,7 @@ async def agent(ctx: JobContext):
         if ev.item.role == "assistant" and m.get("e2e_latency") is not None:
             logger.info({"role": ev.item.role, "e2e_latency": m.get("e2e_latency"), "interrupted": ev.item.interrupted})
 
-    await _start_egress(ctx)
+    # await _start_egress(ctx)
     
     await session.start(
         agent=Assistant(),

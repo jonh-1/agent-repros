@@ -1,41 +1,52 @@
+import asyncio
 import json
 import logging
 from datetime import datetime
 from os import getenv
+import time
+from uuid import uuid4
 
 from dotenv import load_dotenv
+from google.protobuf.duration_pb2 import Duration
 from livekit import rtc
 from livekit.agents import (
     Agent,
     AgentServer,
     AgentSession,
     ConversationItemAddedEvent,
+    InterruptionOptions,
     JobContext,
     JobProcess,
+    PreemptiveGenerationOptions,
+    RunContext,
+    StopResponse,
+    TurnHandlingOptions,
+    EndpointingOptions,
     cli,
+    function_tool,
+    get_job_context,
     inference,
     llm,
     room_io,
+    stt,
 )
-
-from livekit.agents.beta.workflows import GetEmailTask
 from livekit.plugins import noise_cancellation, silero
+from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from livekit.agents.inference import TurnDetector
+from livekit import api
 
 
 logger = logging.getLogger("agent")
 
 load_dotenv(".env.local")
 
-AGENT_NUMBER = getenv("AGENT_NUMBER")
-TRANSFER_NUMBER = getenv("TRANSFER_NUMBER")
 
 async def on_session_end(ctx: JobContext) -> None:
     report = ctx.make_session_report()
     report_dict = report.to_dict()
 
     current_date = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"./.tmp/session_report_{current_date}.json"
+    filename = f"./.tmp/session_report_{ctx.room.name}_{current_date}.json"
 
     with open(filename, 'w') as f:
         json.dump(report_dict, f, indent=2)
@@ -59,13 +70,35 @@ class Assistant(Agent):
         )
     
     async def on_enter(self) -> None:
-        email = await GetEmailTask()
-        logger.info(f"Email: {email}")
-
         await self.session.generate_reply(
             instructions="Greet the user, thank them for calling, and ask how you can help.",
             allow_interruptions=True,
         )
+
+    async def llm_node(
+        self,
+        chat_ctx: llm.ChatContext,
+        tools: list[llm.Tool],
+        model_settings: llm.ModelSettings,
+    ):
+        chat_ctx.items[:] = [
+            item
+            for item in chat_ctx.items
+            if not (isinstance(item, llm.ChatMessage) and item.extra.get("silence_followup"))
+        ]
+        logger.info(f"Chat context: {[item.content for item in chat_ctx.items if isinstance(item, llm.ChatMessage)]}")
+        async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
+            yield chunk
+
+
+async def generate_silence_reply(session: AgentSession, *, instructions: str) -> None:
+    handle = await session.generate_reply(instructions=instructions)
+    for item in handle.chat_items:
+        if isinstance(item, llm.FunctionCall):
+            break
+        if isinstance(item, llm.ChatMessage) and item.role == "assistant":
+            item.extra["silence_followup"] = True
+            # item.content = ["[automated follow-up during user silence]"]
 
 
 server = AgentServer()
@@ -78,29 +111,35 @@ def prewarm(proc: JobProcess):
 server.setup_fnc = prewarm
 
 
-@server.rtc_session(agent_name="main-agent-console", on_session_end=on_session_end)
+@server.rtc_session(agent_name="main-agent-prod", on_session_end=on_session_end)
 async def agent(ctx: JobContext):
     ctx.log_context_fields = {
         "room": ctx.room.name,
     }
 
     session = AgentSession(
-        stt=inference.STT(model="deepgram/nova-3"),
-        llm=inference.LLM(model="google/gemini-3.5-flash"),
-        tts=inference.TTS(model="cartesia/sonic-3.5"),
+        stt=inference.STT(model="deepgram/nova-3", language="multi"),
+        llm=inference.LLM(model="google/gemini-2.5-flash"),
+        tts=inference.TTS(model="cartesia/sonic-3", voice="5ee9feff-1265-424a-9d7f-8e4d431a12c7"),
         vad=ctx.proc.userdata["vad"],
         preemptive_generation=True,
         turn_detection=TurnDetector(),
         allow_interruptions=True,
     )
 
-    @session.on("conversation_item_added")
-    def on_conversation_item_added(ev: ConversationItemAddedEvent) -> None:
-        if not isinstance(ev.item, llm.ChatMessage):
-            return
-        m = ev.item.metrics
-        if ev.item.role == "assistant" and m.get("e2e_latency") is not None:
-            logger.info({"role": ev.item.role, "e2e_latency": m.get("e2e_latency"), "interrupted": ev.item.interrupted})
+    @session.on("user_state_changed")
+    def on_user_state_changed(ev) -> None:
+        if ev.new_state == "away":
+            asyncio.create_task(
+                generate_silence_reply(
+                    session,
+                    instructions=(
+                        "The user has not responded for a while. "
+                        "If your previous response was incomplete or you intended to call a tool but did not, do so now. "
+                        "Otherwise, gently follow up with the user to check if they are still there."
+                    ),
+                )
+            )
     
     await session.start(
         agent=Assistant(),
@@ -115,12 +154,7 @@ async def agent(ctx: JobContext):
                 ),
             ),
         ),
-        record={
-            "audio": True,
-            "traces": True,
-            "transcript": True,
-            "logs": True,
-        }
+        record=True,
     )
 
     await ctx.connect()
