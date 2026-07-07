@@ -2,38 +2,24 @@ import asyncio
 import json
 import logging
 from datetime import datetime
-from os import getenv
-import time
-from uuid import uuid4
 
 from dotenv import load_dotenv
-from google.protobuf.duration_pb2 import Duration
 from livekit import rtc
 from livekit.agents import (
     Agent,
     AgentServer,
     AgentSession,
-    ConversationItemAddedEvent,
-    InterruptionOptions,
     JobContext,
     JobProcess,
-    PreemptiveGenerationOptions,
-    RunContext,
-    StopResponse,
-    TurnHandlingOptions,
-    EndpointingOptions,
     cli,
-    function_tool,
-    get_job_context,
     inference,
     llm,
     room_io,
-    stt,
 )
+from livekit.agents.voice import SpeechHandle
 from livekit.plugins import noise_cancellation, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from livekit.agents.inference import TurnDetector
-from livekit import api
 
 
 logger = logging.getLogger("agent")
@@ -84,20 +70,24 @@ class Assistant(Agent):
         chat_ctx.items[:] = [
             item
             for item in chat_ctx.items
-            if not (isinstance(item, llm.ChatMessage) and item.extra.get("silence_followup"))
+            if not (isinstance(item, llm.ChatMessage) and item.extra.get("masked"))
         ]
-        logger.info(f"Chat context: {[item.content for item in chat_ctx.items if isinstance(item, llm.ChatMessage)]}")
         async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
             yield chunk
 
 
-async def generate_silence_reply(session: AgentSession, *, instructions: str) -> None:
-    handle = await session.generate_reply(instructions=instructions)
+def _mask_reply(handle: SpeechHandle) -> None:
     for item in handle.chat_items:
         if isinstance(item, llm.FunctionCall):
             break
         if isinstance(item, llm.ChatMessage) and item.role == "assistant":
-            item.extra["silence_followup"] = True
+            item.extra["masked"] = True
+
+
+async def generate_silence_reply(session: AgentSession, *, instructions: str) -> SpeechHandle:
+    handle = session.generate_reply(instructions=instructions)
+    handle.add_done_callback(_mask_reply)
+    return await handle
 
 
 server = AgentServer()
