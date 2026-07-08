@@ -1,23 +1,3 @@
-"""Warm transfer + IVR DTMF navigation repro.
-
-Bug: ``livekit.agents.beta.tools.send_dtmf_events`` always publishes via
-``get_job_context().room``, which is the ORIGINAL caller room. Inside a
-``WarmTransferTask`` the consult agent runs in a separate ``<room>-human-agent``
-room, so DTMF tones are published to the caller-on-hold leg and the IVR on the
-rep-leg never hears them.
-
-Fix: use ``context.session.room_io.room`` instead, which resolves to whatever
-room the currently-executing session is connected to. The custom
-``send_dtmf_events`` tool below does exactly that.
-
-To test the bug:
-  1. Call the agent.
-  2. Ask to be warm-transferred somewhere that has a DTMF IVR (e.g. "press 1
-     for sales").
-  3. Observe logs: with the SDK tool, tones go to the caller room; with the
-     fixed tool, tones go to the consult room.
-"""
-
 import asyncio
 import logging
 from datetime import datetime
@@ -149,7 +129,7 @@ class Assistant(Agent):
                 sip_trunk_id=SIP_TRUNK_ID,
                 sip_number=_format_e164(AGENT_NUMBER),
                 chat_ctx=self.chat_ctx,
-                tools=[sdk_send_dtmf_events],
+                tools=[send_dtmf_events],
                 instructions=InstructionParts(
                     extra=IVR_NAVIGATION_INSTRUCTIONS,
                 ),
