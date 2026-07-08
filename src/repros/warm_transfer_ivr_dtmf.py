@@ -129,7 +129,7 @@ class Assistant(Agent):
                 sip_trunk_id=SIP_TRUNK_ID,
                 sip_number=_format_e164(AGENT_NUMBER),
                 chat_ctx=self.chat_ctx,
-                tools=[send_dtmf_events],
+                tools=[sdk_send_dtmf_events],
                 instructions=InstructionParts(
                     extra=IVR_NAVIGATION_INSTRUCTIONS,
                 ),
